@@ -1,4 +1,4 @@
-name: Jenkins AMI Pipeline
+name: Jenkins AMI Build & Deploy
 
 on:
   push:
@@ -6,12 +6,19 @@ on:
       - 'v*'
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
-  build-deploy-release:
+  build-ami:
+    name: Build Jenkins AMI
     runs-on: ubuntu-latest
 
+    outputs:
+      ami_id: ${{ steps.extract.outputs.ami_id }}
+
     steps:
-      - name: 📥 Checkout repo
+      - name: 📥 Checkout repository
         uses: actions/checkout@v3
 
       - name: 🔧 Set up Packer
@@ -26,20 +33,14 @@ jobs:
 
       - name: 🚀 Build Jenkins AMI
         run: |
-          cd packer
-          packer init .
-          packer build jenkins-ami.pkr.hcl
+          packer init packer
+          packer build packer/jenkins-ami.pkr.hcl
 
-      - name: 🛡️ Scan AMI manifest with Trivy
+      - name: 🔍 Extract AMI ID from manifest
+        id: extract
         run: |
-          cd scan
-          bash trivy-scan.sh ../packer/jenkins-ami-manifest.json
-
-      - name: 🏗️ Deploy EC2 with Terraform
-        run: |
-          cd terraform
-          terraform init
-          terraform apply -auto-approve
+          AMI_ID=$(jq -r '.builds[0].artifact_id' packer/jenkins-ami-manifest.json | cut -d ':' -f2)
+          echo "ami_id=$AMI_ID" >> $GITHUB_OUTPUT
 
       - name: 📝 Create GitHub Release
         uses: softprops/action-gh-release@v1
@@ -47,8 +48,38 @@ jobs:
           tag_name: ${{ github.ref_name }}
           name: "Jenkins AMI ${{ github.ref_name }}"
           body: |
-            AMI built and deployed via Terraform.
-            Vulnerability scan passed.
+            Jenkins AMI built and released.
+            AMI ID: ${{ steps.extract.outputs.ami_id }}
           files: packer/jenkins-ami-manifest.json
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  deploy-terraform:
+    name: Deploy Jenkins AMI via Terraform
+    runs-on: ubuntu-latest
+    needs: build-ami
+
+    steps:
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v3
+
+      - name: 🔧 Setup Terraform CLI
+        uses: hashicorp/setup-terraform@v1
+        with:
+          cli_config_credentials_token: ${{ secrets.TF_API_TOKEN }}
+
+      - name: 🧱 Terraform Init
+        run: |
+          cd terraform
+          terraform init
+
+      - name: 📊 Terraform Plan
+        run: |
+          cd terraform
+          terraform plan -input=false -var="ami_id=${{ needs.build-ami.outputs.ami_id }}"
+
+      - name: 🚀 Terraform Apply
+        if: github.ref == 'refs/heads/master' && github.event_name == 'push'
+        run: |
+          cd terraform
+          terraform apply -auto-approve -input=false -var="ami_id=${{ needs.build-ami.outputs.ami_id }}"
