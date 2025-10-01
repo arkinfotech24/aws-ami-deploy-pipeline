@@ -1,47 +1,85 @@
-name: Terraform
+name: Jenkins AMI Build & Deploy
 
 on:
-  workflow_dispatch:
   push:
-    branches: [ "master" ]
+    tags:
+      - 'v*'
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  terraform:
-    name: Terraform
+  build-ami:
+    name: Build Jenkins AMI
     runs-on: ubuntu-latest
-    environment: production
 
-    defaults:
-      run:
-        shell: bash
+    outputs:
+      ami_id: ${{ steps.extract.outputs.ami_id }}
 
     steps:
       - name: 📥 Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v3
+
+      - name: 🔧 Set up Packer
+        uses: hashicorp/setup-packer@v2
+
+      - name: 🔐 Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: 🚀 Build Jenkins AMI
+        run: |
+          packer init packer
+          packer build packer/jenkins-ami.pkr.hcl
+
+      - name: 🔍 Extract AMI ID from manifest
+        id: extract
+        run: |
+          AMI_ID=$(jq -r '.builds[0].artifact_id' packer/jenkins-ami-manifest.json | cut -d ':' -f2)
+          echo "ami_id=$AMI_ID" >> $GITHUB_OUTPUT
+
+      - name: 📝 Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: "Jenkins AMI ${{ github.ref_name }}"
+          body: |
+            Jenkins AMI built and released.
+            AMI ID: ${{ steps.extract.outputs.ami_id }}
+          files: packer/jenkins-ami-manifest.json
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  deploy-terraform:
+    name: Deploy Jenkins AMI via Terraform
+    runs-on: ubuntu-latest
+    needs: build-ami
+
+    steps:
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v3
 
       - name: 🔧 Setup Terraform CLI
         uses: hashicorp/setup-terraform@v1
         with:
           cli_config_credentials_token: ${{ secrets.TF_API_TOKEN }}
 
-      - name: 🔍 Extract AMI ID from manifest
-        id: ami
-        run: |
-          AMI_ID=$(jq -r '.builds[0].artifact_id' packer/jenkins-ami-manifest.json | cut -d ':' -f2)
-          echo "ami_id=$AMI_ID" >> $GITHUB_OUTPUT
-
       - name: 🧱 Terraform Init
-        run: terraform init
-
-      - name: 🧹 Terraform Format Check
-        run: terraform fmt -check
+        run: |
+          cd terraform
+          terraform init
 
       - name: 📊 Terraform Plan
-        run: terraform plan -input=false -var="ami_id=${{ steps.ami.outputs.ami_id }}"
+        run: |
+          cd terraform
+          terraform plan -input=false -var="ami_id=${{ needs.build-ami.outputs.ami_id }}"
 
       - name: 🚀 Terraform Apply
         if: github.ref == 'refs/heads/master' && github.event_name == 'push'
-        run: terraform apply -auto-approve -input=false -var="ami_id=${{ steps.ami.outputs.ami_id }}"
+        run: |
+          cd terraform
+          terraform apply -auto-approve -input=false -var="ami_id=${{ needs.build-ami.outputs.ami_id }}"
