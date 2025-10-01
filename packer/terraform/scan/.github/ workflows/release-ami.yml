@@ -1,0 +1,54 @@
+name: Jenkins AMI Pipeline
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build-deploy-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 📥 Checkout repo
+        uses: actions/checkout@v3
+
+      - name: 🔧 Set up Packer
+        uses: hashicorp/setup-packer@v2
+
+      - name: 🔐 Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: 🚀 Build Jenkins AMI
+        run: |
+          cd packer
+          packer init .
+          packer build jenkins-ami.pkr.hcl
+
+      - name: 🛡️ Scan AMI manifest with Trivy
+        run: |
+          cd scan
+          bash trivy-scan.sh ../packer/jenkins-ami-manifest.json
+
+      - name: 🏗️ Deploy EC2 with Terraform
+        run: |
+          cd terraform
+          terraform init
+          terraform apply -auto-approve
+
+      - name: 📝 Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: "Jenkins AMI ${{ github.ref_name }}"
+          body: |
+            AMI built and deployed via Terraform.
+            Vulnerability scan passed.
+          files: packer/jenkins-ami-manifest.json
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
