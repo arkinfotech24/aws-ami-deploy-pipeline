@@ -1,0 +1,47 @@
+name: Terraform
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "master" ]
+
+permissions:
+  contents: read
+
+jobs:
+  terraform:
+    name: Terraform
+    runs-on: ubuntu-latest
+    environment: production
+
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v4
+
+      - name: 🔧 Setup Terraform CLI
+        uses: hashicorp/setup-terraform@v1
+        with:
+          cli_config_credentials_token: ${{ secrets.TF_API_TOKEN }}
+
+      - name: 🔍 Extract AMI ID from manifest
+        id: ami
+        run: |
+          AMI_ID=$(jq -r '.builds[0].artifact_id' packer/jenkins-ami-manifest.json | cut -d ':' -f2)
+          echo "ami_id=$AMI_ID" >> $GITHUB_OUTPUT
+
+      - name: 🧱 Terraform Init
+        run: terraform init
+
+      - name: 🧹 Terraform Format Check
+        run: terraform fmt -check
+
+      - name: 📊 Terraform Plan
+        run: terraform plan -input=false -var="ami_id=${{ steps.ami.outputs.ami_id }}"
+
+      - name: 🚀 Terraform Apply
+        if: github.ref == 'refs/heads/master' && github.event_name == 'push'
+        run: terraform apply -auto-approve -input=false -var="ami_id=${{ steps.ami.outputs.ami_id }}"
